@@ -1,0 +1,8 @@
+{
+  "teachers": [
+    {
+      "username": "teacher",
+      "password_hash": "pbkdf2_sha256$600000$mergington$60ff81f61a35867b97997256114af608655d16590fb3cbf089ffb3bcbaf616db"
+    }
+  ]
+}
