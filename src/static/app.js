@@ -18,6 +18,16 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  async function refreshAuthState() {
+    try {
+      const response = await fetch("/auth/session");
+      isTeacher = response.ok;
+    } catch (error) {
+      isTeacher = false;
+    }
+    updateAuthControls();
+  }
+
   // Function to fetch activities from API
   async function fetchActivities() {
     try {
@@ -110,6 +120,10 @@ document.addEventListener("DOMContentLoaded", () => {
       } else {
         messageDiv.textContent = result.detail || "An error occurred";
         messageDiv.className = "error";
+        if (response.status === 401) {
+          isTeacher = false;
+          updateAuthControls();
+        }
       }
 
       messageDiv.classList.remove("hidden");
@@ -155,6 +169,10 @@ document.addEventListener("DOMContentLoaded", () => {
       } else {
         messageDiv.textContent = result.detail || "An error occurred";
         messageDiv.className = "error";
+        if (response.status === 401) {
+          isTeacher = false;
+          updateAuthControls();
+        }
       }
 
       messageDiv.classList.remove("hidden");
@@ -207,6 +225,5 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Initialize app
-  updateAuthControls();
-  fetchActivities();
+  refreshAuthState().then(fetchActivities);
 });
