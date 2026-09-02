@@ -5,7 +5,14 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+import hashlib
+import hmac
+import json
+import sqlite3
+import secrets
+import time
+from fastapi import Cookie, FastAPI, HTTPException, Response
+from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
@@ -18,6 +25,49 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+with open(current_dir / "teachers.json", encoding="utf-8") as teachers_file:
+    teachers = json.load(teachers_file)["teachers"]
+
+SESSION_TTL = 8 * 60 * 60
+session_db = current_dir / "sessions.sqlite3"
+
+
+def initialize_session_store():
+    with sqlite3.connect(session_db) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS sessions "
+            "(session_id TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at REAL NOT NULL)"
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at)")
+
+
+initialize_session_store()
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+def hash_password(password, salt):
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 600000).hex()
+
+
+def get_teacher(session_id):
+    if not session_id:
+        raise HTTPException(status_code=401, detail="Teacher login required")
+    now = time.time()
+    with sqlite3.connect(session_db) as connection:
+        row = connection.execute(
+            "SELECT username FROM sessions WHERE session_id = ? AND expires_at > ?",
+            (session_id, now),
+        ).fetchone()
+        connection.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+    username = row[0] if row else None
+    if not username:
+        raise HTTPException(status_code=401, detail="Teacher login required")
+    return username
 
 # In-memory activity database
 activities = {
@@ -88,9 +138,53 @@ def get_activities():
     return activities
 
 
+@app.post("/auth/login")
+def login(login_request: LoginRequest, response: Response):
+    teacher = next((item for item in teachers
+                    if item["username"] == login_request.username), None)
+    if not teacher:
+        raise HTTPException(status_code=401, detail="Invalid teacher credentials")
+
+    hash_parts = teacher.get("password_hash", "").split("$")
+    if len(hash_parts) != 4 or hash_parts[:2] != ["pbkdf2_sha256", "600000"]:
+        raise HTTPException(status_code=401, detail="Invalid teacher credentials")
+    _, _, salt, expected_hash = hash_parts
+    actual_hash = hash_password(login_request.password, salt)
+    if not hmac.compare_digest(actual_hash, expected_hash):
+        raise HTTPException(status_code=401, detail="Invalid teacher credentials")
+
+    session_id = secrets.token_urlsafe(32)
+    with sqlite3.connect(session_db) as connection:
+        connection.execute("DELETE FROM sessions WHERE expires_at <= ?", (time.time(),))
+        connection.execute(
+            "INSERT INTO sessions (session_id, username, expires_at) VALUES (?, ?, ?)",
+            (session_id, login_request.username, time.time() + SESSION_TTL),
+        )
+    response.set_cookie(
+        "teacher_session", session_id, max_age=SESSION_TTL, httponly=True, samesite="lax"
+    )
+    return {"username": login_request.username}
+
+
+@app.get("/auth/session")
+def session(teacher_session: str | None = Cookie(default=None)):
+    return {"username": get_teacher(teacher_session)}
+
+
+@app.post("/auth/logout")
+def logout(response: Response, teacher_session: str | None = Cookie(default=None)):
+    if teacher_session:
+        with sqlite3.connect(session_db) as connection:
+            connection.execute("DELETE FROM sessions WHERE session_id = ?", (teacher_session,))
+    response.delete_cookie("teacher_session")
+    return {"message": "Logged out"}
+
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str,
+                         teacher_session: str | None = Cookie(default=None)):
     """Sign up a student for an activity"""
+    get_teacher(teacher_session)
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -111,8 +205,10 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str,
+                             teacher_session: str | None = Cookie(default=None)):
     """Unregister a student from an activity"""
+    get_teacher(teacher_session)
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
